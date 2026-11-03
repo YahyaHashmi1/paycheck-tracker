@@ -14,6 +14,7 @@ from app.database import Base
 
 
 class BillingCycleStatus(str, Enum):
+    RECORDED = "RECORDED"
     FIRST_HALF_PAID = "FIRST_HALF_PAID"
     COMPLETE = "COMPLETE"
 
@@ -26,8 +27,9 @@ class BillingCycle(Base):
             "uq_one_open_cycle_per_category",
             "category_id",
             unique=True,
+            # Only one unfinished billing cycle is allowed per category.
             postgresql_where=text(
-                "status = 'FIRST_HALF_PAID'"
+                 "status IN ('RECORDED', 'FIRST_HALF_PAID')"
             ),
         ),
     )

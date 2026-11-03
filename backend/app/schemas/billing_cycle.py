@@ -9,11 +9,10 @@ from app.models.billing_cycle import BillingCycleStatus
 
 
 class BillingCycleCreate(BaseModel):
-    # Category and paycheck used to begin allocating this bill.
+    # Category that received the recurring credit card charge.
     category_id: UUID
-    paycheck_id: UUID
 
-    # Full bill amount, not just the first-half allocation.
+    # Full amount charged to the credit card.
     total_amount: Decimal = Field(
         gt=0, max_digits=10, decimal_places=2
     )

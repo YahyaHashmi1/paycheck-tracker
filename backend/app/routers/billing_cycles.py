@@ -25,14 +25,11 @@ def create_billing_cycle(
     data: BillingCycleCreate,
     db: Session = Depends(get_db),
 ):
-    # Find the category and paycheck selected for the first allocation.
+    # Find the category receiving the recurring credit card charge.
     category = db.get(ExpenseCategory, data.category_id)
-    paycheck = db.get(Paycheck, data.paycheck_id)
 
     if category is None:
         raise HTTPException(status_code=404, detail="Category not found")
-    if paycheck is None:
-        raise HTTPException(status_code=404, detail="Paycheck not found")
 
     # Only fixed or variable recurring categories use billing cycles.
     if category.type == CategoryType.VARIABLE_NON_RECURRING:
@@ -44,60 +41,45 @@ def create_billing_cycle(
     if not category.active:
         raise HTTPException(status_code=400, detail="Category is inactive")
 
-    # The category and paycheck must belong to the same user.
-    if category.user_id != paycheck.user_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Category and paycheck belong to different users",
-        )
-
-    # Do not allow a second cycle while the previous cycle is still open.
+    # Do not allow another bill while the previous bill is unfinished.
     open_cycle = (
         db.query(BillingCycle)
         .filter(
             BillingCycle.category_id == category.id,
-            BillingCycle.status == BillingCycleStatus.FIRST_HALF_PAID,
+            BillingCycle.status.in_([
+                BillingCycleStatus.RECORDED,
+                BillingCycleStatus.FIRST_HALF_PAID,
+            ]),
         )
         .first()
     )
+
     if open_cycle is not None:
         raise HTTPException(
             status_code=409,
-            detail="This category already has an open billing cycle",
+            detail="This category already has an unfinished billing cycle",
         )
 
-    # Round the first half to cents; the second half receives the remainder.
-    first_amount = (data.total_amount / Decimal("2")).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
-
-    # Start the cycle as incomplete until the second allocation is recorded.
+    # Record the full credit card charge without allocating it to a paycheck.
     cycle = BillingCycle(
         category_id=category.id,
         total_amount=data.total_amount,
-        status=BillingCycleStatus.FIRST_HALF_PAID,
+        status=BillingCycleStatus.RECORDED,
     )
-    db.add(cycle)
-    db.flush()  # Generate cycle.id before creating its payment record.
-
-    # Record the first allocation in the source-of-truth payments table.
-    first_payment = BillingCyclePayment(
-        billing_cycle_id=cycle.id,
-        paycheck_id=paycheck.id,
-        amount=first_amount,
-    )
-    db.add(first_payment)
 
     try:
-        # Save the cycle and its first payment in one transaction.
+        # Save only the billing cycle.
+        # No BillingCyclePayment is created at this stage.
+        db.add(cycle)
         db.commit()
         db.refresh(cycle)
+
     except IntegrityError as exc:
-        # A concurrent request may have created an open cycle first.
+        # Handle a concurrent request that created another unfinished cycle.
         db.rollback()
         raise HTTPException(
             status_code=409,
-            detail="Could not create cycle; check for an existing open cycle",
+            detail="Could not create cycle; check for an existing unfinished cycle",
         ) from exc
 
     return cycle

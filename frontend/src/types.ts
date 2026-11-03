@@ -8,6 +8,7 @@ export interface Paycheck {
   pay_date: string;
   period_start: string;
   period_end: string;
+  created_at: string;
 }
 
 // Matches the fields returned by the ExpenseCategoryRead schema.
@@ -16,7 +17,11 @@ export interface ExpenseCategory {
   user_id: string;
   name: string;
   budget: string | null;
-  type: "VARIABLE_NON_RECURRING" | "FIXED_RECURRING" | "VARIABLE_RECURRING";
+  expected_amount: string | null;
+  type:
+    | "VARIABLE_NON_RECURRING"
+    | "FIXED_RECURRING"
+    | "VARIABLE_RECURRING";
   active: boolean;
 }
 
@@ -44,6 +49,7 @@ export interface ExpenseCategoryCreate {
   user_id: string;
   name: string;
   budget: string | null;
+  expected_amount: string | null;
   type:
     | "VARIABLE_NON_RECURRING"
     | "FIXED_RECURRING"
@@ -60,3 +66,27 @@ export interface ExpenseItemCreate {
   spent_on: string;
 }
 
+// Represents a recurring bill split across two paychecks.
+export interface BillingCycle {
+  id: string;
+  category_id: string;
+  total_amount: string;
+  status: "RECORDED" |"FIRST_HALF_PAID" | "COMPLETE";
+  created_at: string;
+  completed_at: string | null;
+}
+
+// Represents the portion of a recurring bill allocated to a paycheck.
+export interface BillingCyclePayment {
+  id: string;
+  billing_cycle_id: string;
+  paycheck_id: string;
+  amount: string;
+  created_at: string;
+}
+
+// Data required to create a recurring bill cycle.
+export interface BillingCycleCreate {
+  category_id: string;
+  total_amount: string;
+}

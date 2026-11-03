@@ -31,8 +31,15 @@ class ExpenseCategory(Base):
     name: Mapped[str] = mapped_column(
         String(100), nullable=False
     )
-    budget: Mapped[Decimal] = mapped_column(
-        Numeric(10, 2), nullable=True
+    # Optional spending limit for variable non-recurring categories.
+    budget: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2),
+        nullable=True,
+    )
+    # Expected bill amount for fixed recurring categories.
+    expected_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2),
+        nullable=True,
     )
     type: Mapped[CategoryType] = mapped_column(
         SQLEnum(CategoryType, name="category_type"), nullable=False,
