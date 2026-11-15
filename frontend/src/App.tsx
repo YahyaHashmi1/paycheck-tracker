@@ -1,34 +1,33 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 
-import { useEffect, useMemo, useState } from "react";
-import type { ComponentProps } from "react";
-
-import { getJson, postJson } from "./api";
+import { apiRequest, getJson, postJson } from "./api";
+import {
+  DashboardHeader,
+  PayPeriodSelector,
+  PaycheckSummary,
+  RecurringBillsPanel,
+  VariableExpensesPanel,
+} from "./DashboardComponents";
 import type {
-  Paycheck,
-  PaycheckCreate,
+  BillingCycle,
+  BillingCycleCreate,
+  BillingCyclePayment,
   ExpenseCategory,
   ExpenseCategoryCreate,
   ExpenseItem,
   ExpenseItemCreate,
-  BillingCycle,
-  BillingCyclePayment,
-  BillingCycleCreate,
+  Paycheck,
+  PaycheckCreate,
 } from "./types";
 
 import "./App.css";
 
-// Read the development user ID from the Vite environment.
 const USER_ID = import.meta.env.VITE_DEMO_USER_ID;
 
-// Infer React's form-submit event type from its form component props.
-type FormSubmitEvent = Parameters<
-  NonNullable<ComponentProps<"form">["onSubmit"]>
->[0];
-
-// Category types supported by the application.
 type CategoryType = ExpenseCategory["type"];
+type ActiveDialog = "paycheck" | "category" | "expense" | "bill" | null;
 
-// Return today's date in local YYYY-MM-DD format.
 function getToday(): string {
   const today = new Date();
   const year = today.getFullYear();
@@ -38,33 +37,9 @@ function getToday(): string {
   return `${year}-${month}-${day}`;
 }
 
-// Format API monetary values as US currency.
-function formatCurrency(
-  value: string | number | null | undefined,
-): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(Number(value ?? 0));
-}
-
-// Display readable category type names.
-function formatCategoryType(type: CategoryType): string {
-  const labels: Record<CategoryType, string> = {
-    VARIABLE_NON_RECURRING: "Variable non-recurring",
-    FIXED_RECURRING: "Fixed recurring",
-    VARIABLE_RECURRING: "Variable recurring",
-  };
-
-  return labels[type];
-}
-
 function App() {
-  // --------------------------------------------------
-  // Dashboard data
-  // --------------------------------------------------
-
   const [paychecks, setPaychecks] = useState<Paycheck[]>([]);
+  const [selectedPaycheckId, setSelectedPaycheckId] = useState("");
   const [categories, setCategories] = useState<ExpenseCategory[]>([]);
   const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
   const [billingCycles, setBillingCycles] = useState<BillingCycle[]>([]);
@@ -72,52 +47,34 @@ function App() {
     BillingCyclePayment[]
   >([]);
 
-  // --------------------------------------------------
-  // General page status
-  // --------------------------------------------------
-
   const [loading, setLoading] = useState(true);
+  const [expensesLoading, setExpensesLoading] = useState(false);
   const [saving, setSaving] = useState("");
+  const [deletingExpenseId, setDeletingExpenseId] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-
-  // --------------------------------------------------
-  // Add paycheck form
-  // --------------------------------------------------
+  const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
 
   const [paycheckAmount, setPaycheckAmount] = useState("");
   const [payDate, setPayDate] = useState(getToday());
 
-  // --------------------------------------------------
-  // Add category form
-  // --------------------------------------------------
-
-  // An empty string means the user has not selected a category type.
   const [categoryType, setCategoryType] = useState<CategoryType | "">("");
   const [categoryName, setCategoryName] = useState("");
   const [categoryBudget, setCategoryBudget] = useState("");
   const [categoryExpectedAmount, setCategoryExpectedAmount] = useState("");
-
-  // --------------------------------------------------
-  // Add ordinary expense form
-  // --------------------------------------------------
 
   const [expenseCategoryId, setExpenseCategoryId] = useState("");
   const [expenseName, setExpenseName] = useState("");
   const [expenseAmount, setExpenseAmount] = useState("");
   const [spentOn, setSpentOn] = useState(getToday());
 
-  // --------------------------------------------------
-  // Add recurring bill form
-  // --------------------------------------------------
-
   const [billingCategoryId, setBillingCategoryId] = useState("");
   const [billingTotalAmount, setBillingTotalAmount] = useState("");
 
-  // The latest paycheck is the active paycheck for the dashboard.
-  const currentPaycheck = paychecks[0];
+  const selectedPaycheck = paychecks.find(
+    (paycheck) => paycheck.id === selectedPaycheckId,
+  ) ?? paychecks[0];
 
-  // Only variable non-recurring categories accept ordinary expense items.
   const regularCategories = useMemo(
     () =>
       categories.filter(
@@ -126,7 +83,6 @@ function App() {
     [categories],
   );
 
-  // Fixed and variable recurring categories are handled separately.
   const recurringCategories = useMemo(
     () =>
       categories.filter(
@@ -137,19 +93,39 @@ function App() {
     [categories],
   );
 
-  // --------------------------------------------------
-  // Load dashboard data
-  // --------------------------------------------------
+  const effectiveExpenseCategoryId = regularCategories.some(
+    (category) => category.id === expenseCategoryId,
+  )
+    ? expenseCategoryId
+    : regularCategories[0]?.id ?? "";
 
-  // Retrieve paychecks and active categories for the development user.
-  async function loadDashboard() {
+  const effectiveBillingCategoryId = recurringCategories.some(
+    (category) => category.id === billingCategoryId,
+  )
+    ? billingCategoryId
+    : recurringCategories[0]?.id ?? "";
+
+  const selectedPaycheckForExpenses = selectedPaycheck?.id;
+
+  const isCurrentPaycheck =
+    selectedPaycheck !== undefined && selectedPaycheck.id === paychecks[0]?.id;
+
+  const nextRecordedPaycheck = selectedPaycheck
+    ? paychecks
+        .filter((paycheck) => paycheck.pay_date > selectedPaycheck.pay_date)
+        .sort((a, b) => a.pay_date.localeCompare(b.pay_date))[0]
+    : undefined;
+
+  const nextPaycheckDate =
+    nextRecordedPaycheck?.pay_date ?? selectedPaycheck?.period_end;
+
+  const loadDashboard = useCallback(async () => {
     if (!USER_ID) {
       throw new Error(
         "Set VITE_DEMO_USER_ID in frontend/.env to your existing user UUID.",
       );
     }
 
-    // Fetch both collections concurrently.
     const [paycheckData, categoryData] = await Promise.all([
       getJson<Paycheck[]>("/paychecks"),
       getJson<ExpenseCategory[]>(
@@ -157,32 +133,43 @@ function App() {
       ),
     ]);
 
-    // Keep only this user's paychecks and sort newest first.
     const userPaychecks = paycheckData
       .filter((paycheck) => paycheck.user_id === USER_ID)
       .sort((a, b) => b.pay_date.localeCompare(a.pay_date));
-
-    // Hide categories that have been deactivated.
-    const activeCategories = categoryData.filter(
-      (category) => category.active,
+    const activeCategories = categoryData.filter((category) => category.active);
+    const availableRecurringCategories = activeCategories.filter(
+      (category) =>
+        category.type === "FIXED_RECURRING" ||
+        category.type === "VARIABLE_RECURRING",
     );
+    const selectedRecurringCategory = availableRecurringCategories[0];
 
     setPaychecks(userPaychecks);
+    setSelectedPaycheckId((previousId) =>
+      userPaychecks.some((paycheck) => paycheck.id === previousId)
+        ? previousId
+        : userPaychecks[0]?.id ?? "",
+    );
     setCategories(activeCategories);
-  }
+    setBillingCategoryId(selectedRecurringCategory?.id ?? "");
+    setBillingTotalAmount(
+      selectedRecurringCategory?.type === "FIXED_RECURRING"
+        ? selectedRecurringCategory.expected_amount ?? ""
+        : "",
+    );
+  }, []);
 
-  // Retrieve recurring billing cycles and their payment allocations.
-  async function loadBillingData() {
-    if (!USER_ID) return;
+  const loadBillingData = useCallback(async () => {
+    if (!USER_ID) {
+      throw new Error(
+        "Set VITE_DEMO_USER_ID in frontend/.env to your existing user UUID.",
+      );
+    }
 
-    // Fetch all recurring billing cycles for this user.
     const cycles = await getJson<BillingCycle[]>(
       `/billing-cycles?user_id=${encodeURIComponent(USER_ID)}`,
     );
 
-    setBillingCycles(cycles);
-
-    // Fetch payment allocations for each billing cycle.
     const paymentGroups = await Promise.all(
       cycles.map((cycle) =>
         getJson<BillingCyclePayment[]>(
@@ -193,11 +180,10 @@ function App() {
       ),
     );
 
-    // Combine the individual payment arrays.
+    setBillingCycles(cycles);
     setBillingPayments(paymentGroups.flat());
-  }
+  }, []);
 
-  // Load the dashboard when the component first mounts.
   useEffect(() => {
     async function initializeDashboard() {
       try {
@@ -214,27 +200,23 @@ function App() {
     }
 
     void initializeDashboard();
-  }, []);
+  }, [loadDashboard, loadBillingData]);
 
-  // --------------------------------------------------
-  // Load current paycheck expenses
-  // --------------------------------------------------
-
-  // Fetch expenses whenever the active paycheck changes.
   useEffect(() => {
     let cancelled = false;
 
-    async function loadExpenses() {
-      if (!currentPaycheck) {
+    async function loadSelectedExpenses() {
+      if (!selectedPaycheckForExpenses) {
         setExpenses([]);
+        setExpensesLoading(false);
         return;
       }
 
+      setExpensesLoading(true);
       try {
-        // Retrieve only expenses associated with the active paycheck.
         const data = await getJson<ExpenseItem[]>(
           `/expense-items?paycheck_id=${encodeURIComponent(
-            currentPaycheck.id,
+            selectedPaycheckForExpenses,
           )}`,
         );
 
@@ -244,138 +226,24 @@ function App() {
       } catch (err) {
         if (!cancelled) {
           setError(
-            err instanceof Error
-              ? err.message
-              : "Unable to load expenses.",
+            err instanceof Error ? err.message : "Unable to load expenses.",
           );
+        }
+      } finally {
+        if (!cancelled) {
+          setExpensesLoading(false);
         }
       }
     }
 
-    void loadExpenses();
+    void loadSelectedExpenses();
 
-    // Prevent stale responses from updating the dashboard.
     return () => {
       cancelled = true;
     };
-  }, [currentPaycheck?.id]);
+  }, [selectedPaycheckForExpenses]);
 
-  // --------------------------------------------------
-  // Keep form selections valid
-  // --------------------------------------------------
-
-  // Select the first ordinary expense category when available.
-  useEffect(() => {
-    if (regularCategories.length === 0) {
-      setExpenseCategoryId("");
-      return;
-    }
-
-    const selectionIsValid = regularCategories.some(
-      (category) => category.id === expenseCategoryId,
-    );
-
-    if (!selectionIsValid) {
-      setExpenseCategoryId(regularCategories[0].id);
-    }
-  }, [regularCategories, expenseCategoryId]);
-
-  // Select the first recurring category when available.
-  useEffect(() => {
-    if (recurringCategories.length === 0) {
-      setBillingCategoryId("");
-      return;
-    }
-
-    const selectionIsValid = recurringCategories.some(
-      (category) => category.id === billingCategoryId,
-    );
-
-    if (!selectionIsValid) {
-      setBillingCategoryId(recurringCategories[0].id);
-    }
-  }, [recurringCategories, billingCategoryId]);
-
-  // Prefill the expected amount when a fixed recurring category is selected.
-  useEffect(() => {
-    const selectedCategory = recurringCategories.find(
-      (category) => category.id === billingCategoryId,
-    );
-
-    if (selectedCategory?.type === "FIXED_RECURRING") {
-      setBillingTotalAmount(selectedCategory.expected_amount ?? "");
-    } else {
-      // Variable recurring bills require the actual amount to be entered.
-      setBillingTotalAmount("");
-    }
-  }, [billingCategoryId, recurringCategories]);
-
-  // Reload recurring billing data when the current paycheck changes.
-  useEffect(() => {
-    void loadBillingData().catch((err) => {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load recurring bills.",
-      );
-    });
-  }, [currentPaycheck?.id]);
-
-  // --------------------------------------------------
-  // Category spending calculations
-  // --------------------------------------------------
-
-  // Calculate ordinary and recurring spending for each category.
-  const categorySpending = useMemo(() => {
-    return categories.map((category) => {
-      // Sum ordinary expenses for this category and paycheck.
-      const regularSpending = expenses
-        .filter((expense) => expense.category_id === category.id)
-        .reduce(
-          (total, expense) => total + Number(expense.amount),
-          0,
-        );
-
-      // Sum recurring bill allocations for this category and paycheck.
-      const recurringSpending = billingCycles
-        .filter((cycle) => cycle.category_id === category.id)
-        .reduce((total, cycle) => {
-          const cyclePaymentTotal = billingPayments
-            .filter(
-              (payment) =>
-                payment.billing_cycle_id === cycle.id &&
-                payment.paycheck_id === currentPaycheck?.id,
-            )
-            .reduce(
-              (sum, payment) => sum + Number(payment.amount),
-              0,
-            );
-
-          return total + cyclePaymentTotal;
-        }, 0);
-
-      // Combine ordinary expenses and recurring allocations.
-      const spent = regularSpending + recurringSpending;
-
-      // Calculate remaining budget only when a budget exists.
-      const remaining =
-        category.budget === null
-          ? null
-          : Number(category.budget) - spent;
-
-      return {
-        category,
-        spent,
-        remaining,
-      };
-    });
-  }, [categories, expenses, billingCycles, billingPayments, currentPaycheck?.id]);
-
-  // --------------------------------------------------
-  // Add paycheck
-  // --------------------------------------------------
-
-  async function handleAddPaycheck(event: FormSubmitEvent) {
+  async function handleAddPaycheck(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving("paycheck");
     setError("");
@@ -386,25 +254,22 @@ function App() {
         throw new Error("Configure VITE_DEMO_USER_ID in frontend/.env.");
       }
 
-      // Send the new paycheck to the backend.
       const data: PaycheckCreate = {
         user_id: USER_ID,
         amount: paycheckAmount,
         pay_date: payDate,
       };
 
-      await postJson<Paycheck, PaycheckCreate>("/paychecks", data);
+      const createdPaycheck = await postJson<Paycheck, PaycheckCreate>(
+        "/paychecks",
+        data,
+      );
 
-      // Refresh paychecks so the new one becomes the active paycheck.
-      await loadDashboard();
-
-      // Refresh billing cycles and allocations created by the backend
-      // when this paycheck was added.
-      await loadBillingData();
-
-      // Clear the form after successful creation.
+      await Promise.all([loadDashboard(), loadBillingData()]);
+      setSelectedPaycheckId(createdPaycheck.id);
       setPaycheckAmount("");
       setPayDate(getToday());
+      setActiveDialog(null);
       setMessage("Paycheck added successfully.");
     } catch (err) {
       setError(
@@ -415,11 +280,7 @@ function App() {
     }
   }
 
-  // --------------------------------------------------
-  // Add expense category
-  // --------------------------------------------------
-
-  async function handleAddCategory(event: FormSubmitEvent) {
+  async function handleAddCategory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving("category");
     setError("");
@@ -429,26 +290,20 @@ function App() {
       if (!USER_ID) {
         throw new Error("Configure VITE_DEMO_USER_ID in frontend/.env.");
       }
-
       if (!categoryType) {
         throw new Error("Select a category type.");
       }
 
-      // Prepare category data based on the selected category type.
       const data: ExpenseCategoryCreate = {
         user_id: USER_ID,
         name: categoryName.trim(),
         type: categoryType,
         active: true,
-
-        // Only variable non-recurring categories use a budget.
         budget:
           categoryType === "VARIABLE_NON_RECURRING" &&
           categoryBudget.trim() !== ""
             ? categoryBudget
             : null,
-
-        // Only fixed recurring categories use an expected bill amount.
         expected_amount:
           categoryType === "FIXED_RECURRING"
             ? categoryExpectedAmount
@@ -459,16 +314,13 @@ function App() {
         "/expense-categories",
         data,
       );
-
-      // Refresh the category list.
       await loadDashboard();
 
-      // Reset the category form, including its type selection.
       setCategoryType("");
       setCategoryName("");
       setCategoryBudget("");
       setCategoryExpectedAmount("");
-
+      setActiveDialog(null);
       setMessage("Expense category added successfully.");
     } catch (err) {
       setError(
@@ -481,52 +333,40 @@ function App() {
     }
   }
 
-  // --------------------------------------------------
-  // Add ordinary expense
-  // --------------------------------------------------
-
-  async function handleAddExpense(event: FormSubmitEvent) {
+  async function handleAddExpense(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving("expense");
     setError("");
     setMessage("");
 
-    // Ordinary expenses must be associated with the active paycheck.
-    if (!currentPaycheck) {
+    if (!selectedPaycheck) {
       setError("Add a paycheck before adding expenses.");
       setSaving("");
       return;
     }
 
     try {
-      // Automatically associate the expense with the current paycheck.
       const data: ExpenseItemCreate = {
-        category_id: expenseCategoryId,
-        paycheck_id: currentPaycheck.id,
+        category_id: effectiveExpenseCategoryId,
+        paycheck_id: selectedPaycheck.id,
         name: expenseName.trim(),
         amount: expenseAmount,
         spent_on: spentOn,
       };
 
-      await postJson<ExpenseItem, ExpenseItemCreate>(
-        "/expense-items",
-        data,
-      );
+      await postJson<ExpenseItem, ExpenseItemCreate>("/expense-items", data);
 
-      // Refresh the current paycheck's expenses.
       const updatedExpenses = await getJson<ExpenseItem[]>(
         `/expense-items?paycheck_id=${encodeURIComponent(
-          currentPaycheck.id,
+          selectedPaycheck.id,
         )}`,
       );
 
       setExpenses(updatedExpenses);
-
-      // Clear the form.
       setExpenseName("");
       setExpenseAmount("");
       setSpentOn(getToday());
-
+      setActiveDialog(null);
       setMessage("Expense added successfully.");
     } catch (err) {
       setError(
@@ -537,20 +377,44 @@ function App() {
     }
   }
 
-  // --------------------------------------------------
-  // Add recurring bill
-  // --------------------------------------------------
+  async function handleDeleteExpense(expenseId: string) {
+    if (!window.confirm("Delete this expense? This action cannot be undone.")) {
+      return;
+    }
 
-  async function handleAddRecurringBill(event: FormSubmitEvent) {
+    setDeletingExpenseId(expenseId);
+    setError("");
+    setMessage("");
+
+    try {
+      await apiRequest<void>(`/expense-items/${encodeURIComponent(expenseId)}`, {
+        method: "DELETE",
+      });
+
+      setExpenses((currentExpenses) =>
+        currentExpenses.filter((expense) => expense.id !== expenseId),
+      );
+      setMessage("Expense deleted successfully.");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unable to delete expense.",
+      );
+    } finally {
+      setDeletingExpenseId("");
+    }
+  }
+
+  async function handleAddRecurringBill(
+    event: FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
     setSaving("billing");
     setError("");
     setMessage("");
 
     try {
-      // Record the credit card charge without allocating it to a paycheck.
       const data: BillingCycleCreate = {
-        category_id: billingCategoryId,
+        category_id: effectiveBillingCategoryId,
         total_amount: billingTotalAmount,
       };
 
@@ -558,531 +422,386 @@ function App() {
         "/billing-cycles",
         data,
       );
-
-      // Refresh billing cycles and their payment allocations.
       await loadBillingData();
 
       setBillingTotalAmount("");
+      setActiveDialog(null);
       setMessage("Recurring bill added successfully.");
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to add recurring bill.",
+        err instanceof Error ? err.message : "Unable to add recurring bill.",
       );
     } finally {
       setSaving("");
     }
   }
 
-  // --------------------------------------------------
-  // Loading state
-  // --------------------------------------------------
+  function openExpenseDialog(categoryId?: string) {
+    if (categoryId) {
+      setExpenseCategoryId(categoryId);
+    }
+    setActiveDialog("expense");
+  }
 
   if (loading) {
     return (
-      <main className="dashboard">
-        <h1>Paycheck Tracker</h1>
-        <p>Loading dashboard...</p>
+      <main className="dashboard-shell">
+        <div className="dashboard-loading" role="status">
+          Loading your dashboard...
+        </div>
       </main>
     );
   }
 
-  // --------------------------------------------------
-  // Dashboard UI
-  // --------------------------------------------------
-
   return (
-    <main className="dashboard">
-      <header>
-        <h1>Paycheck Tracker</h1>
-        <p>Track your paychecks, expenses, and recurring bills.</p>
-      </header>
+    <main className="dashboard-shell">
+      <div className="dashboard">
+        <DashboardHeader
+          onAddPaycheck={() => setActiveDialog("paycheck")}
+          onAddCategory={() => setActiveDialog("category")}
+        />
 
-      {/* Display errors and successful-action messages. */}
-      {error && (
-        <p className="error-message" role="alert">
-          {error}
-        </p>
-      )}
-
-      {message && (
-        <p className="success-message" role="status">
-          {message}
-        </p>
-      )}
-
-      {/* Current paycheck summary. */}
-      <section className="panel">
-        <h2>Current Paycheck</h2>
-
-        {currentPaycheck ? (
-          <>
-            <p className="summary-amount">
-              {formatCurrency(currentPaycheck.amount)}
-            </p>
-
-            <p>
-              Pay period: {currentPaycheck.period_start} –{" "}
-              {currentPaycheck.period_end}
-            </p>
-
-            <p>Pay date: {currentPaycheck.pay_date}</p>
-          </>
-        ) : (
-          <p>No paycheck has been added yet.</p>
+        {error && !activeDialog && (
+          <p className="feedback-message error-message" role="alert">
+            {error}
+          </p>
         )}
-      </section>
+        {message && (
+          <p className="feedback-message success-message" role="status">
+            {message}
+          </p>
+        )}
 
-      {/* Add paycheck form. */}
-      <section className="panel">
-        <h2>Add Paycheck</h2>
+        <section className="period-toolbar" aria-label="Pay period selection">
+          <div>
+            <span className="eyebrow">Dashboard overview</span>
+            <h2>Pay period</h2>
+          </div>
+          <PayPeriodSelector
+            paychecks={paychecks}
+            selectedPaycheckId={selectedPaycheck?.id ?? ""}
+            onChange={(id) => {
+              setSelectedPaycheckId(id);
+              setError("");
+              setMessage("");
+            }}
+          />
+        </section>
 
-        <form onSubmit={handleAddPaycheck}>
-          <label>
-            Paycheck amount
-            <input
-              type="number"
-              min="0.01"
-              step="0.01"
-              value={paycheckAmount}
-              onChange={(event) => setPaycheckAmount(event.target.value)}
-              placeholder="3000.00"
-              required
-            />
-          </label>
+        <PaycheckSummary
+          paycheck={selectedPaycheck}
+          isCurrent={isCurrentPaycheck}
+          nextPaycheckDate={nextPaycheckDate}
+          isNextPaycheckRecorded={nextRecordedPaycheck !== undefined}
+        />
 
-          <label>
-            Pay date
-            <input
-              type="date"
-              value={payDate}
-              onChange={(event) => setPayDate(event.target.value)}
-              required
-            />
-          </label>
+        <div className="dashboard-panels">
+          <VariableExpensesPanel
+            categories={regularCategories}
+            expenses={expenses}
+            expensesLoading={expensesLoading}
+            hasPaycheck={selectedPaycheck !== undefined}
+            onAddExpense={openExpenseDialog}
+            onDeleteExpense={handleDeleteExpense}
+            deletingExpenseId={deletingExpenseId}
+          />
+          <RecurringBillsPanel
+            categories={recurringCategories}
+            billingCycles={billingCycles}
+            billingPayments={billingPayments}
+            paycheckId={selectedPaycheck?.id}
+            onAddBill={() => setActiveDialog("bill")}
+          />
+        </div>
+      </div>
 
-          <button type="submit" disabled={saving !== ""}>
-            {saving === "paycheck" ? "Adding..." : "Add Paycheck"}
-          </button>
-        </form>
-      </section>
+      {activeDialog && (
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && saving === "") {
+              setActiveDialog(null);
+            }
+          }}
+        >
+          <section
+            className="form-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dialog-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && saving === "") {
+                setActiveDialog(null);
+              }
+            }}
+          >
+            <div className="dialog-heading">
+              <div>
+                <span className="eyebrow">Paycheck Tracker</span>
+                <h2 id="dialog-title">
+                  {activeDialog === "paycheck" && "Add paycheck"}
+                  {activeDialog === "category" && "Add expense category"}
+                  {activeDialog === "expense" && "Add expense"}
+                  {activeDialog === "bill" && "Record a recurring bill"}
+                </h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close dialog"
+                autoFocus
+                onClick={() => setActiveDialog(null)}
+                disabled={saving !== ""}
+              >
+                ×
+              </button>
+            </div>
 
-      {/* Add expense category with fields that depend on its type. */}
-      <section className="panel">
-        <h2>Add Expense Category</h2>
+            {error && (
+              <p className="dialog-feedback error-message" role="alert">
+                {error}
+              </p>
+            )}
 
-        <form onSubmit={handleAddCategory}>
-          {/* Category type must be selected before other fields appear. */}
-          <label>
-            Category type
-            <select
-              value={categoryType}
-              onChange={(event) => {
-                // Clear previous type-specific values when the type changes.
-                setCategoryType(event.target.value as CategoryType | "");
-                setCategoryName("");
-                setCategoryBudget("");
-                setCategoryExpectedAmount("");
-              }}
-              required
-            >
-              <option value="">Select a category type</option>
-              <option value="VARIABLE_NON_RECURRING">
-                Variable non-recurring
-              </option>
-              <option value="FIXED_RECURRING">
-                Fixed recurring
-              </option>
-              <option value="VARIABLE_RECURRING">
-                Variable recurring
-              </option>
-            </select>
-          </label>
-
-          {/* Show the remaining fields only after a type is selected. */}
-          {categoryType !== "" && (
-            <>
-              <label>
-                Category name
-                <input
-                  type="text"
-                  value={categoryName}
-                  onChange={(event) => setCategoryName(event.target.value)}
-                  placeholder="Enter category name"
-                  maxLength={100}
-                  required
-                />
-              </label>
-
-              {/* Variable non-recurring categories have an optional budget. */}
-              {categoryType === "VARIABLE_NON_RECURRING" && (
+            {activeDialog === "paycheck" && (
+              <form onSubmit={handleAddPaycheck}>
                 <label>
-                  Budget (optional)
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={categoryBudget}
-                    onChange={(event) =>
-                      setCategoryBudget(event.target.value)
-                    }
-                    placeholder="Leave blank for no budget"
-                  />
-                </label>
-              )}
-
-              {/* Fixed recurring categories have a known expected amount. */}
-              {categoryType === "FIXED_RECURRING" && (
-                <label>
-                  Expected bill amount
+                  Paycheck amount
                   <input
                     type="number"
                     min="0.01"
                     step="0.01"
-                    value={categoryExpectedAmount}
-                    onChange={(event) =>
-                      setCategoryExpectedAmount(event.target.value)
-                    }
-                    placeholder="120.00"
+                    value={paycheckAmount}
+                    onChange={(event) => setPaycheckAmount(event.target.value)}
+                    placeholder="3000.00"
                     required
                   />
                 </label>
-              )}
+                <label>
+                  Pay date
+                  <input
+                    type="date"
+                    value={payDate}
+                    onChange={(event) => setPayDate(event.target.value)}
+                    required
+                  />
+                </label>
+                <button type="submit" disabled={saving !== ""}>
+                  {saving === "paycheck" ? "Adding..." : "Add paycheck"}
+                </button>
+              </form>
+            )}
 
-              {/* Variable recurring categories need no amount at creation. */}
-              {categoryType === "VARIABLE_RECURRING" && (
-                <p>
-                  You will enter the actual bill amount when recording the
-                  recurring bill.
-                </p>
-              )}
+            {activeDialog === "category" && (
+              <form onSubmit={handleAddCategory}>
+                <label>
+                  Category type
+                  <select
+                    value={categoryType}
+                    onChange={(event) => {
+                      setCategoryType(event.target.value as CategoryType | "");
+                      setCategoryName("");
+                      setCategoryBudget("");
+                      setCategoryExpectedAmount("");
+                    }}
+                    required
+                  >
+                    <option value="">Select a category type</option>
+                    <option value="VARIABLE_NON_RECURRING">
+                      Variable non-recurring
+                    </option>
+                    <option value="FIXED_RECURRING">Fixed recurring</option>
+                    <option value="VARIABLE_RECURRING">
+                      Variable recurring
+                    </option>
+                  </select>
+                </label>
 
-              <button type="submit" disabled={saving !== ""}>
-                {saving === "category" ? "Adding..." : "Add Category"}
-              </button>
-            </>
-          )}
-        </form>
-      </section>
-
-      {/* Display all active expense categories. */}
-      <section className="panel">
-        <h2>Expense Categories</h2>
-
-        {categories.length === 0 ? (
-          <p>No expense categories have been created yet.</p>
-        ) : (
-          <ul className="record-list">
-            {categories.map((category) => (
-              <li key={category.id}>
-                <div>
-                  <strong>{category.name}</strong>
-                  <p>{formatCategoryType(category.type)}</p>
-                </div>
-
-                <div>
-                  {category.type === "VARIABLE_NON_RECURRING" && (
-                    <span>
-                      {category.budget === null
-                        ? "No budget"
-                        : `Budget: ${formatCurrency(category.budget)}`}
-                    </span>
-                  )}
-
-                  {category.type === "FIXED_RECURRING" && (
-                    <span>
-                      Expected: {formatCurrency(category.expected_amount)}
-                    </span>
-                  )}
-
-                  {category.type === "VARIABLE_RECURRING" && (
-                    <span>Variable bill amount</span>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* Show spending and remaining budget for each category. */}
-      <section className="panel">
-        <h2>Spending by Category</h2>
-
-        {!currentPaycheck ? (
-          <p>Add a paycheck to view category spending.</p>
-        ) : categorySpending.length === 0 ? (
-          <p>No categories have been created yet.</p>
-        ) : (
-          <ul className="record-list">
-            {categorySpending.map(({ category, spent, remaining }) => (
-              <li key={category.id}>
-                <div>
-                  <strong>{category.name}</strong>
-
-                  <p>Spent: {formatCurrency(spent)}</p>
-
-                  {category.budget !== null && (
-                    <>
-                      <p>Budget: {formatCurrency(category.budget)}</p>
-
-                      <p>
-                        {remaining !== null && remaining >= 0
-                          ? `Remaining: ${formatCurrency(remaining)}`
-                          : `Over budget: ${formatCurrency(
-                              Math.abs(remaining ?? 0),
-                            )}`}
+                {categoryType && (
+                  <>
+                    <label>
+                      Category name
+                      <input
+                        type="text"
+                        value={categoryName}
+                        onChange={(event) => setCategoryName(event.target.value)}
+                        placeholder="Enter category name"
+                        maxLength={100}
+                        required
+                      />
+                    </label>
+                    {categoryType === "VARIABLE_NON_RECURRING" && (
+                      <label>
+                        Budget (optional)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={categoryBudget}
+                          onChange={(event) =>
+                            setCategoryBudget(event.target.value)
+                          }
+                          placeholder="Leave blank for no budget"
+                        />
+                      </label>
+                    )}
+                    {categoryType === "FIXED_RECURRING" && (
+                      <label>
+                        Expected bill amount
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={categoryExpectedAmount}
+                          onChange={(event) =>
+                            setCategoryExpectedAmount(event.target.value)
+                          }
+                          placeholder="120.00"
+                          required
+                        />
+                      </label>
+                    )}
+                    {categoryType === "VARIABLE_RECURRING" && (
+                      <p className="form-note">
+                        You will enter the actual amount when recording a bill.
                       </p>
-                    </>
-                  )}
+                    )}
+                    <button type="submit" disabled={saving !== ""}>
+                      {saving === "category" ? "Adding..." : "Add category"}
+                    </button>
+                  </>
+                )}
+              </form>
+            )}
 
-                  {category.budget === null && (
-                    <p>
-                      {category.type === "FIXED_RECURRING"
-                        ? `Expected bill: ${formatCurrency(
-                            category.expected_amount,
-                          )}`
-                        : "No budget set"}
-                    </p>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+            {activeDialog === "expense" &&
+              (selectedPaycheck === undefined ? (
+                <p className="empty-state">
+                  Add a paycheck before recording expenses.
+                </p>
+              ) : regularCategories.length === 0 ? (
+                <p className="empty-state">
+                  Create a variable non-recurring category first.
+                </p>
+              ) : (
+                <form onSubmit={handleAddExpense}>
+                  <p className="form-note">
+                    This expense will be added to the selected pay period
+                    ending {selectedPaycheck.period_end}.
+                  </p>
+                  <label>
+                    Expense category
+                    <select
+                      value={effectiveExpenseCategoryId}
+                      onChange={(event) =>
+                        setExpenseCategoryId(event.target.value)
+                      }
+                      required
+                    >
+                      {regularCategories.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Expense name
+                    <input
+                      type="text"
+                      value={expenseName}
+                      onChange={(event) => setExpenseName(event.target.value)}
+                      placeholder="Weekly groceries"
+                      maxLength={150}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Amount
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      value={expenseAmount}
+                      onChange={(event) =>
+                        setExpenseAmount(event.target.value)
+                      }
+                      placeholder="75.50"
+                      required
+                    />
+                  </label>
+                  <label>
+                    Date of purchase
+                    <input
+                      type="date"
+                      value={spentOn}
+                      onChange={(event) => setSpentOn(event.target.value)}
+                      required
+                    />
+                  </label>
+                  <button type="submit" disabled={saving !== ""}>
+                    {saving === "expense" ? "Adding..." : "Add expense"}
+                  </button>
+                </form>
+              ))}
 
-      {/* Add ordinary expenses to variable non-recurring categories. */}
-      <section className="panel">
-        <h2>Add Expense</h2>
-
-        {!currentPaycheck ? (
-          <p>Add a paycheck first to start recording expenses.</p>
-        ) : regularCategories.length === 0 ? (
-          <p>
-            Create a variable non-recurring category first, such as Groceries
-            or Eating Out.
-          </p>
-        ) : (
-          <form onSubmit={handleAddExpense}>
-            <p>
-              Adding expense to paycheck dated{" "}
-              <strong>{currentPaycheck.pay_date}</strong>.
-            </p>
-
-            <label>
-              Expense category
-              <select
-                value={expenseCategoryId}
-                onChange={(event) =>
-                  setExpenseCategoryId(event.target.value)
-                }
-                required
-              >
-                {regularCategories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Expense name
-              <input
-                type="text"
-                value={expenseName}
-                onChange={(event) => setExpenseName(event.target.value)}
-                placeholder="Weekly groceries"
-                maxLength={150}
-                required
-              />
-            </label>
-
-            <label>
-              Amount
-              <input
-                type="number"
-                min="0.01"
-                step="0.01"
-                value={expenseAmount}
-                onChange={(event) => setExpenseAmount(event.target.value)}
-                placeholder="75.50"
-                required
-              />
-            </label>
-
-            <label>
-              Date of purchase
-              <input
-                type="date"
-                value={spentOn}
-                onChange={(event) => setSpentOn(event.target.value)}
-                required
-              />
-            </label>
-
-            <button type="submit" disabled={saving !== ""}>
-              {saving === "expense" ? "Adding..." : "Add Expense"}
-            </button>
-          </form>
-        )}
-      </section>
-
-      {/* Record a recurring credit card charge without allocating it yet. */}
-      <section className="panel">
-        <h2>Add Recurring Bill</h2>
-
-        {recurringCategories.length === 0 ? (
-          <p>
-            Create a fixed recurring or variable recurring category first.
-          </p>
-        ) : (
-          <form onSubmit={handleAddRecurringBill}>
-            <p>
-              Record the credit card charge here. It will be allocated
-              automatically as you add future paychecks.
-            </p>
-
-            <label>
-              Recurring category
-              <select
-                value={billingCategoryId}
-                onChange={(event) =>
-                  setBillingCategoryId(event.target.value)
-                }
-                required
-              >
-                {recurringCategories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Actual bill amount
-              <input
-                type="number"
-                min="0.01"
-                step="0.01"
-                value={billingTotalAmount}
-                onChange={(event) =>
-                  setBillingTotalAmount(event.target.value)
-                }
-                placeholder="Enter bill amount"
-                required
-              />
-            </label>
-
-            <button type="submit" disabled={saving !== ""}>
-              {saving === "billing" ? "Adding..." : "Add Recurring Bill"}
-            </button>
-          </form>
-        )}
-      </section>
-
-      {/* Display recurring bill cycles and their allocation status. */}
-      <section className="panel">
-        <h2>Recurring Bills</h2>
-
-        {billingCycles.length === 0 ? (
-          <p>No recurring bills have been recorded yet.</p>
-        ) : (
-          <ul className="record-list">
-            {billingCycles.map((cycle) => {
-              // Find the category associated with this billing cycle.
-              const category = categories.find(
-                (item) => item.id === cycle.category_id,
-              );
-
-              // Calculate the amount allocated to the current paycheck.
-              const currentPayment = billingPayments
-                .filter(
-                  (payment) =>
-                    payment.billing_cycle_id === cycle.id &&
-                    payment.paycheck_id === currentPaycheck?.id,
-                )
-                .reduce(
-                  (total, payment) => total + Number(payment.amount),
-                  0,
-                );
-
-              // Calculate total allocations across all paychecks.
-              const totalAllocated = billingPayments
-                .filter((payment) => payment.billing_cycle_id === cycle.id)
-                .reduce(
-                  (total, payment) => total + Number(payment.amount),
-                  0,
-                );
-
-              return (
-                <li key={cycle.id}>
-                  <div>
-                    <strong>{category?.name ?? "Unknown category"}</strong>
-
-                    <p>Full bill: {formatCurrency(cycle.total_amount)}</p>
-
-                    <p>
-                      Current paycheck allocation:{" "}
-                      {formatCurrency(currentPayment)}
-                    </p>
-
-                    <p>
-                      Total allocated: {formatCurrency(totalAllocated)}
-                    </p>
-
-                    <p>
-                      Status:{" "}
-                      {cycle.status === "RECORDED"
-                        ? "Bill Recorded"
-                        : cycle.status === "FIRST_HALF_PAID"
-                          ? "First Half Paid"
-                          : "Complete"}
-                    </p>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      {/* Display individual ordinary expenses for the current paycheck. */}
-      <section className="panel">
-        <h2>Current Paycheck Expenses</h2>
-
-        {!currentPaycheck ? (
-          <p>Add a paycheck to view its expenses.</p>
-        ) : expenses.length === 0 ? (
-          <p>No ordinary expenses recorded for this paycheck yet.</p>
-        ) : (
-          <ul className="record-list">
-            {expenses.map((expense) => {
-              // Look up the category name for each expense.
-              const category = categories.find(
-                (item) => item.id === expense.category_id,
-              );
-
-              return (
-                <li key={expense.id}>
-                  <div>
-                    <strong>{expense.name}</strong>
-                    <p>
-                      {category?.name ?? "Unknown category"} ·{" "}
-                      {expense.spent_on}
-                    </p>
-                  </div>
-
-                  <strong>{formatCurrency(expense.amount)}</strong>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+            {activeDialog === "bill" &&
+              (recurringCategories.length === 0 ? (
+                <p className="empty-state">
+                  Create a fixed or variable recurring category first.
+                </p>
+              ) : (
+                <form onSubmit={handleAddRecurringBill}>
+                  <p className="form-note">
+                    Bill allocations are created automatically when paychecks
+                    are added.
+                  </p>
+                  <label>
+                    Recurring category
+                    <select
+                      value={effectiveBillingCategoryId}
+                      onChange={(event) => {
+                        const nextCategory = recurringCategories.find(
+                          (category) => category.id === event.target.value,
+                        );
+                        setBillingCategoryId(event.target.value);
+                        setBillingTotalAmount(
+                          nextCategory?.type === "FIXED_RECURRING"
+                            ? nextCategory.expected_amount ?? ""
+                            : "",
+                        );
+                      }}
+                      required
+                    >
+                      {recurringCategories.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Actual bill amount
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      value={billingTotalAmount}
+                      onChange={(event) =>
+                        setBillingTotalAmount(event.target.value)
+                      }
+                      placeholder="Enter bill amount"
+                      required
+                    />
+                  </label>
+                  <button type="submit" disabled={saving !== ""}>
+                    {saving === "billing" ? "Recording..." : "Add bill"}
+                  </button>
+                </form>
+              ))}
+          </section>
+        </div>
+      )}
     </main>
   );
 }
